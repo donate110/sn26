@@ -34,13 +34,46 @@ class ChallengeSpec:
     timeout_seconds: int
 
 
+def _make_wallet(config):
+    if hasattr(bt, "wallet"):
+        return bt.wallet(config=config)
+    wallet_cls = getattr(bt, "Wallet", None)
+    if wallet_cls is None:
+        raise RuntimeError("No wallet constructor found in bittensor.")
+    try:
+        return wallet_cls(config=config)
+    except TypeError:
+        return wallet_cls(name=config.wallet.name, hotkey=config.wallet.hotkey)
+
+
+def _make_subtensor(config):
+    if hasattr(bt, "subtensor"):
+        return bt.subtensor(config=config)
+    subtensor_cls = getattr(bt, "Subtensor", None)
+    if subtensor_cls is None:
+        raise RuntimeError("No subtensor constructor found in bittensor.")
+    try:
+        return subtensor_cls(config=config)
+    except TypeError:
+        return subtensor_cls(network=config.subtensor.network)
+
+
+def _make_dendrite(wallet):
+    if hasattr(bt, "dendrite"):
+        return bt.dendrite(wallet=wallet)
+    dendrite_cls = getattr(bt, "Dendrite", None)
+    if dendrite_cls is None:
+        raise RuntimeError("No dendrite constructor found in bittensor.")
+    return dendrite_cls(wallet=wallet)
+
+
 class PerturbValidator:
     def __init__(self, config: bt.config) -> None:
         self.config = config
-        self.wallet = bt.wallet(config=self.config)
-        self.subtensor = bt.subtensor(config=self.config)
+        self.wallet = _make_wallet(config=self.config)
+        self.subtensor = _make_subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(netuid=self.config.netuid)
-        self.dendrite = bt.dendrite(wallet=self.wallet)
+        self.dendrite = _make_dendrite(wallet=self.wallet)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.model = load_efficientnet_b5(self.device)
@@ -480,12 +513,29 @@ class PerturbValidator:
 def build_config() -> bt.config:
     parser = argparse.ArgumentParser(description="Perturb subnet validator")
     parser.add_argument("--netuid", type=int, required=True)
-    bt.wallet.add_args(parser)
-    bt.subtensor.add_args(parser)
-    bt.logging.add_args(parser)
-    bt.axon.add_args(parser)
+    parser.add_argument("--network", type=str, default=os.getenv("NETWORK", "finney"))
+    parser.add_argument("--wallet.name", dest="wallet_name", type=str, default=os.getenv("WALLET_NAME", "default"))
+    parser.add_argument("--wallet.hotkey", dest="wallet_hotkey", type=str, default=os.getenv("HOTKEY_NAME", "default"))
+    parser.add_argument("--logging-dir", dest="logging_dir", type=str, default=os.getenv("LOGGING_DIR", "./logs"))
 
-    config = bt.config(parser)
+    if hasattr(bt, "config"):
+        config = bt.config(parser)
+    else:
+        config = parser.parse_args()
+
+    if not hasattr(config, "wallet"):
+        config.wallet = type("WalletConfig", (), {})()
+    config.wallet.name = getattr(config.wallet, "name", getattr(config, "wallet_name", "default"))
+    config.wallet.hotkey = getattr(config.wallet, "hotkey", getattr(config, "wallet_hotkey", "default"))
+
+    if not hasattr(config, "subtensor"):
+        config.subtensor = type("SubtensorConfig", (), {})()
+    config.subtensor.network = getattr(config.subtensor, "network", getattr(config, "network", "finney"))
+
+    if not hasattr(config, "logging"):
+        config.logging = type("LoggingConfig", (), {})()
+    config.logging.logging_dir = getattr(config.logging, "logging_dir", getattr(config, "logging_dir", "./logs"))
+
     perturb_cfg = type("PerturbConfig", (), {})()
     config.perturb = perturb_cfg
     for key, value in C.VALIDATOR_CONFIG.items():
