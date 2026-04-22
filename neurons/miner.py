@@ -15,27 +15,36 @@ from perturbnet.protocol import AttackChallenge
 
 
 def _make_wallet(config):
+    wallet_name = getattr(config.wallet, "name", getattr(config, "wallet_name", "default"))
+    wallet_hotkey = getattr(config.wallet, "hotkey", getattr(config, "wallet_hotkey", "default"))
     if hasattr(bt, "wallet"):
-        return bt.wallet(config=config)
+        try:
+            return bt.wallet(name=wallet_name, hotkey=wallet_hotkey)
+        except Exception:
+            return bt.wallet(config=config)
     wallet_cls = getattr(bt, "Wallet", None)
     if wallet_cls is None:
         raise RuntimeError("No wallet constructor found in bittensor.")
     try:
-        return wallet_cls(config=config)
+        return wallet_cls(name=wallet_name, hotkey=wallet_hotkey)
     except TypeError:
-        return wallet_cls(name=config.wallet.name, hotkey=config.wallet.hotkey)
+        return wallet_cls(config=config)
 
 
 def _make_subtensor(config):
+    network = getattr(config.subtensor, "network", getattr(config, "network", "finney"))
     if hasattr(bt, "subtensor"):
-        return bt.subtensor(config=config)
+        try:
+            return bt.subtensor(network=network)
+        except Exception:
+            return bt.subtensor(config=config)
     subtensor_cls = getattr(bt, "Subtensor", None)
     if subtensor_cls is None:
         raise RuntimeError("No subtensor constructor found in bittensor.")
     try:
+        return subtensor_cls(network=network)
+    except Exception:
         return subtensor_cls(config=config)
-    except TypeError:
-        return subtensor_cls(network=config.subtensor.network)
 
 
 def _make_axon(wallet, config):
