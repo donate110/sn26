@@ -316,6 +316,6 @@ Use `docs/READINESS_CHECKLIST.md` before long-run validation or deployment.
 - `scripts/run_llm_endpoint.sh`: start/restart llm endpoint with PM2
 - `scripts/run_validator.sh`: start/restart validator with PM2
 - `scripts/run_miner.sh`: start/restart miner with PM2
-- `scripts/setup_common.sh`: install PM2 and Python/Bittensor common prerequisites
+- `scripts/setup_common.sh`: install PM2, Python/Bittensor deps, and editable local package (`pip install -e .`)
 - `scripts/integration_smoke_test.py`: local integration test
 
