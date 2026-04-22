@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "python3 not found. Install Python 3.10+ and rerun."
+  exit 1
+fi
+
+if ! command -v npm >/dev/null 2>&1; then
+  echo "npm not found. Install Node.js (which includes npm) and rerun."
+  echo "macOS: brew install node"
+  echo "Ubuntu/Debian: sudo apt-get update && sudo apt-get install -y nodejs npm"
+  exit 1
+fi
+
+echo "Installing PM2..."
+npm install -g pm2
+
+echo "Creating/updating virtual environment..."
+if [[ ! -d ".venv" ]]; then
+  python3 -m venv .venv
+fi
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install bittensor bittensor-cli
+
+echo "Common setup complete."

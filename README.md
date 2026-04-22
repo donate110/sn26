@@ -69,10 +69,10 @@ Run these once before role-specific setup:
 ```bash
 git clone https://github.com/0xsigurd/Perturb
 cd Perturb
-npm install -g pm2
+bash ./scripts/setup_common.sh
 ```
 
-If `npm: command not found`, install Node.js first, then rerun PM2 install.
+If `npm: command not found`, install Node.js first, then rerun:
 
 macOS (Homebrew):
 
@@ -80,7 +80,7 @@ macOS (Homebrew):
 brew install node
 node --version
 npm --version
-npm install -g pm2
+bash ./scripts/setup_common.sh
 ```
 
 Ubuntu/Debian:
@@ -90,7 +90,7 @@ sudo apt-get update
 sudo apt-get install -y nodejs npm
 node --version
 npm --version
-sudo npm install -g pm2
+bash ./scripts/setup_common.sh
 ```
 
 ## Installation and Setup (Validator Side)
@@ -316,5 +316,6 @@ Use `docs/READINESS_CHECKLIST.md` before long-run validation or deployment.
 - `scripts/run_llm_endpoint.sh`: start/restart llm endpoint with PM2
 - `scripts/run_validator.sh`: start/restart validator with PM2
 - `scripts/run_miner.sh`: start/restart miner with PM2
+- `scripts/setup_common.sh`: install PM2 and Python/Bittensor common prerequisites
 - `scripts/integration_smoke_test.py`: local integration test
 
