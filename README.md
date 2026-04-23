@@ -72,6 +72,14 @@ cd Perturb
 bash ./scripts/setup_common.sh
 ```
 
+`setup_common.sh` now performs all shared bootstrap steps automatically:
+
+- installs PM2
+- installs Ollama (if missing)
+- starts Ollama server under PM2 (`perturb-ollama`) if needed
+- pulls configured model (`PERTURB_LLM_ENDPOINT_MODEL`, default `qwen2.5:1.5b-instruct`)
+- creates `.venv` and installs Python/Bittensor dependencies
+
 If `npm: command not found`, install Node.js first, then rerun:
 
 macOS (Homebrew):
@@ -313,9 +321,9 @@ Use `docs/READINESS_CHECKLIST.md` before long-run validation or deployment.
 - `perturbnet/model.py`: EfficientNet model load and label prediction helpers
 - `perturbnet/image_io.py`: base64 image encode/decode helpers
 - `tools/llm_endpoint_service.py`: validator-side semantic verification service
-- `scripts/run_llm_endpoint.sh`: start/restart llm endpoint with PM2
+- `scripts/run_llm_endpoint.sh`: start/restart llm endpoint with PM2 (auto-ensures Ollama + model)
 - `scripts/run_validator.sh`: start/restart validator with PM2
 - `scripts/run_miner.sh`: start/restart miner with PM2
-- `scripts/setup_common.sh`: install PM2, Python/Bittensor deps, and editable local package (`pip install -e .`)
+- `scripts/setup_common.sh`: bootstrap PM2 + Ollama + model + Python/Bittensor editable install
 - `scripts/integration_smoke_test.py`: local integration test
 
