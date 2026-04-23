@@ -604,6 +604,12 @@ def build_config() -> bt.config:
     parser.add_argument("--wallet.hotkey", dest="wallet_hotkey", type=str, default=os.getenv("HOTKEY_NAME", "default"))
     parser.add_argument("--logging-dir", dest="logging_dir", type=str, default=os.getenv("LOGGING_DIR", "./logs"))
     parser.add_argument("--log-level", dest="log_level", type=str, default=os.getenv("LOG_LEVEL", "DEBUG"))
+    parser.add_argument(
+        "--axon.port",
+        dest="axon_port",
+        type=int,
+        default=int(os.getenv("VALIDATOR_PORT", os.getenv("AXON_PORT", "8090"))),
+    )
 
     if hasattr(bt, "config"):
         config = bt.config(parser)
@@ -623,6 +629,10 @@ def build_config() -> bt.config:
         config.logging = type("LoggingConfig", (), {})()
     config.logging.logging_dir = getattr(config.logging, "logging_dir", getattr(config, "logging_dir", "./logs"))
     config.log_level = getattr(config, "log_level", os.getenv("LOG_LEVEL", "DEBUG"))
+
+    if not hasattr(config, "axon"):
+        config.axon = type("AxonConfig", (), {})()
+    config.axon.port = int(getattr(config.axon, "port", getattr(config, "axon_port", 8090)))
 
     perturb_cfg = type("PerturbConfig", (), {})()
     config.perturb = perturb_cfg
