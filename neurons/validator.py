@@ -117,6 +117,13 @@ class PerturbValidator:
 
         self._load_state()
 
+    def _log_step_start(self, step_name: str, **context: Any) -> None:
+        if context:
+            rendered = " ".join([f"{k}={v}" for k, v in context.items()])
+            bt.logging.info("[STEP_START] %s %s", step_name, rendered)
+        else:
+            bt.logging.info("[STEP_START] %s", step_name)
+
     def sync(self) -> None:
         old_n = int(self.metagraph.n)
         self.metagraph.sync(subtensor=self.subtensor)
@@ -213,6 +220,12 @@ class PerturbValidator:
                 )
             ),
         }
+        self._log_step_start(
+            "llm_endpoint_check",
+            endpoint=endpoint,
+            prediction=normalized_prediction,
+            expected=expected_label,
+        )
         try:
             response = requests.post(endpoint, json=payload, timeout=8)
             response.raise_for_status()
@@ -253,15 +266,29 @@ class PerturbValidator:
     def generate_challenge(self, block: int) -> ChallengeSpec:
         model_name = C.MODEL_NAME
         base_seed = self._seed_from_block(block)
+        self._log_step_start(
+            "generate_challenge",
+            block=block,
+            base_seed=base_seed,
+            max_attempts=self.config.perturb.max_challenge_attempts,
+        )
         for attempt in range(self.config.perturb.max_challenge_attempts):
             seed = base_seed + attempt
             chosen_prompt = self._choose_prompt(seed)
+            self._log_step_start(
+                "challenge_attempt",
+                attempt=attempt + 1,
+                seed=seed,
+                prompt=chosen_prompt,
+            )
             try:
+                self._log_step_start("challenge_fetch_image", prompt=chosen_prompt, seed=seed)
                 image_b64 = self._fetch_image_for_prompt(prompt=chosen_prompt, seed=seed)
                 effective_prompt = chosen_prompt
             except Exception as exc:
                 bt.logging.warning("Challenge image fetch failed (%s), using fallback dog image.", exc)
                 try:
+                    self._log_step_start("challenge_load_fallback_image", label=C.FALLBACK_LABEL)
                     image_b64 = self._load_fallback_image_b64()
                     effective_prompt = C.FALLBACK_LABEL
                 except Exception as fallback_exc:
@@ -270,8 +297,10 @@ class PerturbValidator:
 
             epsilon = self._sample_epsilon(seed)
             task_id = f"{block}-{seed}"
+            self._log_step_start("challenge_prepare", task_id=task_id, epsilon=f"{epsilon:.4f}")
 
             try:
+                self._log_step_start("challenge_model_inference", task_id=task_id)
                 image = decode_image_b64(image_b64).to(self.device)
                 predicted = predict_label(self.model, image)
                 predicted_label = normalize_prediction_label(predicted)
@@ -327,6 +356,12 @@ class PerturbValidator:
         return sorted(rng.sample(pool, k=k))
 
     async def _query_miners(self, uids: Sequence[int], challenge: ChallengeSpec):
+        self._log_step_start(
+            "query_miners",
+            task_id=challenge.task_id,
+            miner_count=len(uids),
+            timeout=challenge.timeout_seconds,
+        )
         axons = [self.metagraph.axons[uid] for uid in uids]
         synapse = AttackChallenge(
             task_id=challenge.task_id,
@@ -348,6 +383,11 @@ class PerturbValidator:
         return responses
 
     def verify_and_score(self, challenge: ChallengeSpec, perturbed_image_b64: str, response_time_ms: int) -> float:
+        self._log_step_start(
+            "verify_and_score",
+            task_id=challenge.task_id,
+            response_time_ms=response_time_ms,
+        )
         try:
             x_clean = decode_image_b64(challenge.clean_image_b64).to(self.device)
             x_adv = decode_image_b64(perturbed_image_b64).to(self.device)
@@ -405,6 +445,11 @@ class PerturbValidator:
         return 3.0
 
     def _set_weights(self) -> None:
+        self._log_step_start(
+            "set_weights",
+            min_processed=self.config.perturb.min_processed_count,
+            history_size=self.config.perturb.history_size,
+        )
         eligible: list[tuple[int, float]] = []
         min_processed = int(self.config.perturb.min_processed_count)
         history_size = int(self.config.perturb.history_size)
@@ -462,6 +507,7 @@ class PerturbValidator:
             bt.logging.error("set_weights failed: %s", msg)
 
     def run(self) -> None:
+        self._log_step_start("validator_boot")
         self.sync()
         if self.wallet.hotkey.ss58_address not in self.metagraph.hotkeys:
             raise RuntimeError("Validator hotkey is not registered on this netuid.")
@@ -471,8 +517,11 @@ class PerturbValidator:
 
         while True:
             try:
+                self._log_step_start("loop_sync_metagraph")
                 self.sync()
+                self._log_step_start("loop_get_current_block")
                 block = self.subtensor.get_current_block()
+                self._log_step_start("loop_generate_challenge", block=block)
                 challenge = self.generate_challenge(block=block)
                 bt.logging.info(
                     "Challenge task=%s prompt=%s eps=%.4f",
@@ -481,11 +530,13 @@ class PerturbValidator:
                     challenge.epsilon,
                 )
 
+                self._log_step_start("loop_discover_miners")
                 available_uids = self._available_miner_uids()
                 if not available_uids:
                     bt.logging.warning("No miners available")
                     time.sleep(self.config.perturb.query_interval_seconds)
                     continue
+                self._log_step_start("loop_select_miners", candidate_count=len(available_uids))
                 valuable_uids = self._valuable_miner_uids(available_uids)
                 miner_uids = self._select_random_miners(available_uids, seed=self._seed_from_block(block))
                 if not miner_uids:
@@ -499,7 +550,9 @@ class PerturbValidator:
                     len(available_uids),
                 )
 
+                self._log_step_start("loop_query_miners", selected_count=len(miner_uids))
                 responses = asyncio.run(self._query_miners(miner_uids, challenge))
+                self._log_step_start("loop_score_responses", response_count=len(responses))
                 rewards: list[float] = []
                 for uid, response in zip(miner_uids, responses):
                     status_code = getattr(response.dendrite, "status_code", 0) if response.dendrite else 0
@@ -523,15 +576,19 @@ class PerturbValidator:
                         int(self.processed_counts[uid]) + 1,
                     )
 
+                self._log_step_start("loop_update_histories")
                 self._update_histories(miner_uids, rewards)
+                self._log_step_start("loop_save_state")
                 self._save_state()
 
                 blocks_since_weights = block - self.last_weight_block
                 if blocks_since_weights >= tempo:
+                    self._log_step_start("loop_maybe_set_weights", blocks_since_weights=blocks_since_weights, tempo=tempo)
                     self._set_weights()
                     self.last_weight_block = block
 
                 self.step += 1
+                self._log_step_start("loop_sleep", seconds=self.config.perturb.query_interval_seconds)
                 time.sleep(self.config.perturb.query_interval_seconds)
             except KeyboardInterrupt:
                 bt.logging.info("Validator stopped by user.")
