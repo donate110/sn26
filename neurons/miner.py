@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import logging as pylogging
 import os
@@ -34,7 +32,13 @@ def _make_wallet(config):
 
 def _make_subtensor(config):
     network = getattr(config.subtensor, "network", getattr(config, "network", "finney"))
+    chain_endpoint = getattr(config.subtensor, "chain_endpoint", None) or getattr(config, "chain_endpoint", None)
     if hasattr(bt, "subtensor"):
+        if chain_endpoint:
+            try:
+                return bt.subtensor(chain_endpoint=chain_endpoint)
+            except Exception:
+                pass
         try:
             return bt.subtensor(network=network)
         except Exception:
@@ -42,6 +46,11 @@ def _make_subtensor(config):
     subtensor_cls = getattr(bt, "Subtensor", None)
     if subtensor_cls is None:
         raise RuntimeError("No subtensor constructor found in bittensor.")
+    if chain_endpoint:
+        try:
+            return subtensor_cls(chain_endpoint=chain_endpoint)
+        except Exception:
+            pass
     try:
         return subtensor_cls(network=network)
     except Exception:
@@ -49,18 +58,43 @@ def _make_subtensor(config):
 
 
 def _make_axon(wallet, config):
+    axon_config = getattr(config, "axon", None)
+    axon_kwargs = {"wallet": wallet}
+    if axon_config is not None:
+        ip = getattr(axon_config, "ip", None)
+        port = getattr(axon_config, "port", None)
+        external_ip = getattr(axon_config, "external_ip", None)
+        external_port = getattr(axon_config, "external_port", None)
+        max_workers = getattr(axon_config, "max_workers", None)
+        if ip:
+            axon_kwargs["ip"] = ip
+        if port is not None:
+            axon_kwargs["port"] = int(port)
+        if external_ip:
+            axon_kwargs["external_ip"] = external_ip
+        if external_port is not None:
+            axon_kwargs["external_port"] = int(external_port)
+        if max_workers is not None:
+            axon_kwargs["max_workers"] = int(max_workers)
+
     if hasattr(bt, "axon"):
         try:
-            return bt.axon(wallet=wallet)
+            return bt.axon(**axon_kwargs)
         except Exception:
-            return bt.axon(wallet=wallet, config=config)
+            try:
+                return bt.axon(wallet=wallet, config=config)
+            except Exception:
+                return bt.axon(wallet=wallet)
     axon_cls = getattr(bt, "Axon", None)
     if axon_cls is None:
         raise RuntimeError("No axon constructor found in bittensor.")
     try:
-        return axon_cls(wallet=wallet)
+        return axon_cls(**axon_kwargs)
     except Exception:
-        return axon_cls(wallet=wallet, config=config)
+        try:
+            return axon_cls(wallet=wallet, config=config)
+        except Exception:
+            return axon_cls(wallet=wallet)
 
 
 def _configure_log_level(level_raw: str) -> None:
@@ -84,12 +118,12 @@ def _configure_log_level(level_raw: str) -> None:
 
 
 class PerturbMiner:
-    def __init__(self, config: bt.config) -> None:
+    def __init__(self, config: typing.Any) -> None:
         self.config = config
         _configure_log_level(getattr(self.config, "log_level", "DEBUG"))
         self.wallet = _make_wallet(config=self.config)
-        self.subtensor = _make_subtensor(config=self.config)
-        self.metagraph = self.subtensor.metagraph(netuid=self.config.netuid)
+        self.subtensor = self._init_subtensor_with_retry()
+        self.metagraph = self._init_metagraph_with_retry()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.model = load_efficientnet_b5(self.device)
@@ -100,6 +134,36 @@ class PerturbMiner:
             blacklist_fn=self.blacklist,
             priority_fn=self.priority,
         )
+
+    def _init_subtensor_with_retry(self):
+        max_attempts = int(os.getenv("SUBTENSOR_CONNECT_RETRIES", "5"))
+        retry_delay_seconds = float(os.getenv("SUBTENSOR_CONNECT_RETRY_SECONDS", "4"))
+        last_error = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                bt.logging.info(f"[MINER] Connecting subtensor (attempt {attempt}/{max_attempts})")
+                return _make_subtensor(config=self.config)
+            except Exception as err:
+                last_error = err
+                bt.logging.warning(f"[MINER] Subtensor connect failed on attempt {attempt}: {err}")
+                if attempt < max_attempts:
+                    time.sleep(retry_delay_seconds * attempt)
+        raise RuntimeError(f"Failed to connect subtensor after {max_attempts} attempts: {last_error}")
+
+    def _init_metagraph_with_retry(self):
+        max_attempts = int(os.getenv("METAGRAPH_SYNC_RETRIES", "5"))
+        retry_delay_seconds = float(os.getenv("METAGRAPH_SYNC_RETRY_SECONDS", "4"))
+        last_error = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                bt.logging.info(f"[MINER] Loading metagraph netuid={self.config.netuid} (attempt {attempt}/{max_attempts})")
+                return self.subtensor.metagraph(netuid=self.config.netuid)
+            except Exception as err:
+                last_error = err
+                bt.logging.warning(f"[MINER] Metagraph load failed on attempt {attempt}: {err}")
+                if attempt < max_attempts:
+                    time.sleep(retry_delay_seconds * attempt)
+        raise RuntimeError(f"Failed to load metagraph after {max_attempts} attempts: {last_error}")
 
     def sync(self) -> None:
         self.metagraph.sync(subtensor=self.subtensor)
@@ -173,6 +237,10 @@ class PerturbMiner:
         if self.wallet.hotkey.ss58_address not in self.metagraph.hotkeys:
             raise RuntimeError("Miner hotkey is not registered on this netuid.")
 
+        bt.logging.info(
+            f"Axon bind ip={self.config.axon.ip} port={self.config.axon.port} "
+            f"external_ip={self.config.axon.external_ip} external_port={self.config.axon.external_port}"
+        )
         bt.logging.info("Serving miner axon...")
         self.axon.serve(netuid=self.config.netuid, subtensor=self.subtensor)
         self.axon.start()
@@ -183,10 +251,16 @@ class PerturbMiner:
             self.sync()
 
 
-def build_config() -> bt.config:
+def build_config() -> typing.Any:
     parser = argparse.ArgumentParser(description="Perturb subnet miner (default baseline)")
     parser.add_argument("--netuid", type=int, required=True)
     parser.add_argument("--network", type=str, default=os.getenv("NETWORK", "finney"))
+    parser.add_argument(
+        "--subtensor.chain_endpoint",
+        dest="chain_endpoint",
+        type=str,
+        default=os.getenv("SUBTENSOR_CHAIN_ENDPOINT", os.getenv("CHAIN_ENDPOINT", "")),
+    )
     parser.add_argument("--wallet.name", dest="wallet_name", type=str, default=os.getenv("WALLET_NAME", "default"))
     parser.add_argument("--wallet.hotkey", dest="wallet_hotkey", type=str, default=os.getenv("HOTKEY_NAME", "default"))
     parser.add_argument("--logging-dir", dest="logging_dir", type=str, default=os.getenv("LOGGING_DIR", "./logs"))
@@ -205,6 +279,9 @@ def build_config() -> bt.config:
     if not hasattr(config, "subtensor"):
         config.subtensor = type("SubtensorConfig", (), {})()
     config.subtensor.network = getattr(config.subtensor, "network", getattr(config, "network", "finney"))
+    config.subtensor.chain_endpoint = getattr(
+        config.subtensor, "chain_endpoint", getattr(config, "chain_endpoint", "")
+    )
 
     if not hasattr(config, "logging"):
         config.logging = type("LoggingConfig", (), {})()
