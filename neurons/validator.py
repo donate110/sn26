@@ -105,6 +105,7 @@ class PerturbValidator:
         self.subtensor = _make_subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(netuid=self.config.netuid)
         self.dendrite = _make_dendrite(wallet=self.wallet)
+        self._query_loop = asyncio.new_event_loop()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.model = load_efficientnet_b5(self.device)
@@ -380,6 +381,13 @@ class PerturbValidator:
         )
         return responses
 
+    def _run_query_miners(self, uids: Sequence[int], challenge: ChallengeSpec):
+        # Keep a persistent event loop for dendrite calls; asyncio.run() closes
+        # the loop each call and can trigger "Event loop is closed" on reuse.
+        if self._query_loop.is_closed():
+            self._query_loop = asyncio.new_event_loop()
+        return self._query_loop.run_until_complete(self._query_miners(uids, challenge))
+
     def verify_and_score(self, challenge: ChallengeSpec, perturbed_image_b64: str, response_time_ms: int) -> float:
         self._log_step_start(
             "verify_and_score",
@@ -543,7 +551,7 @@ class PerturbValidator:
                 )
 
                 self._log_step_start("loop_query_miners", selected_count=len(miner_uids))
-                responses = asyncio.run(self._query_miners(miner_uids, challenge))
+                responses = self._run_query_miners(miner_uids, challenge)
                 self._log_step_start("loop_score_responses", response_count=len(responses))
                 rewards: list[float] = []
                 for uid, response in zip(miner_uids, responses):
@@ -584,6 +592,8 @@ class PerturbValidator:
             except Exception as exc:
                 bt.logging.error(f"Validator loop error: {exc}")
                 time.sleep(5)
+        if not self._query_loop.is_closed():
+            self._query_loop.close()
 
 
 def build_config() -> bt.config:
