@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging as pylogging
 import os
 import time
 import typing
@@ -56,9 +57,30 @@ def _make_axon(wallet, config):
     return axon_cls(wallet=wallet, config=config)
 
 
+def _configure_log_level(level_raw: str) -> None:
+    level_name = (level_raw or "DEBUG").upper()
+    level = getattr(pylogging, level_name, pylogging.INFO)
+    pylogging.getLogger().setLevel(level)
+    bt_logger = getattr(bt, "logging", None)
+    if bt_logger is None:
+        return
+    try:
+        if level_name == "DEBUG" and hasattr(bt_logger, "set_debug"):
+            bt_logger.set_debug(True)
+        elif level_name in {"WARNING", "WARN"} and hasattr(bt_logger, "set_warning"):
+            bt_logger.set_warning(True)
+        elif level_name == "ERROR" and hasattr(bt_logger, "set_error"):
+            bt_logger.set_error(True)
+        elif hasattr(bt_logger, "set_info"):
+            bt_logger.set_info(True)
+    except Exception:
+        pass
+
+
 class PerturbMiner:
     def __init__(self, config: bt.config) -> None:
         self.config = config
+        _configure_log_level(getattr(self.config, "log_level", "DEBUG"))
         self.wallet = _make_wallet(config=self.config)
         self.subtensor = _make_subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(netuid=self.config.netuid)
@@ -163,6 +185,7 @@ def build_config() -> bt.config:
     parser.add_argument("--wallet.name", dest="wallet_name", type=str, default=os.getenv("WALLET_NAME", "default"))
     parser.add_argument("--wallet.hotkey", dest="wallet_hotkey", type=str, default=os.getenv("HOTKEY_NAME", "default"))
     parser.add_argument("--logging-dir", dest="logging_dir", type=str, default=os.getenv("LOGGING_DIR", "./logs"))
+    parser.add_argument("--log-level", dest="log_level", type=str, default=os.getenv("LOG_LEVEL", "DEBUG"))
 
     if hasattr(bt, "config"):
         config = bt.config(parser)
@@ -181,6 +204,7 @@ def build_config() -> bt.config:
     if not hasattr(config, "logging"):
         config.logging = type("LoggingConfig", (), {})()
     config.logging.logging_dir = getattr(config.logging, "logging_dir", getattr(config, "logging_dir", "./logs"))
+    config.log_level = getattr(config, "log_level", os.getenv("LOG_LEVEL", "DEBUG"))
 
     return config
 

@@ -157,6 +157,7 @@ Important validator-specific fields:
 - `PERTURB_MIN_PROCESSED_COUNT`
 - `PERTURB_MIN_LINF_DELTA`
 - `PERTURB_MAX_LINF_DELTA`
+- `LOG_LEVEL` (`DEBUG` default, set `INFO`/`WARNING`/`ERROR` if you want quieter logs)
 
 ### 3) Start validator stack (llm_endpoint + validator)
 
@@ -198,6 +199,7 @@ Edit required fields in `scripts/miner.env`:
 Optional:
 
 - `PYTHON_BIN`
+- `LOG_LEVEL` (`DEBUG` default, set `INFO`/`WARNING`/`ERROR` if you want quieter logs)
 - `MINER_EXTRA_ARGS`
 
 ### 2) Start miner

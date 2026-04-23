@@ -28,6 +28,7 @@ NETUID="${NETUID:-1}"
 NETWORK="${NETWORK:-local}"
 VALIDATOR_EXTRA_ARGS="${VALIDATOR_EXTRA_ARGS:-}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+LOG_LEVEL="${LOG_LEVEL:-DEBUG}"
 
 if [[ -z "$WALLET_NAME" || -z "$WALLET_HOTKEY" ]]; then
   echo "WALLET_NAME and WALLET_HOTKEY must be set in $ENV_FILE"
@@ -55,6 +56,7 @@ if [[ "${1:-}" == "--foreground" ]]; then
     --network "$NETWORK" \
     --wallet.name "$WALLET_NAME" \
     --wallet.hotkey "$WALLET_HOTKEY" \
+    --log-level "$LOG_LEVEL" \
     $VALIDATOR_EXTRA_ARGS
   exit 0
 fi
@@ -69,6 +71,7 @@ pm2 start ".venv/bin/python" --name perturb-validator -- \
   --network "$NETWORK" \
   --wallet.name "$WALLET_NAME" \
   --wallet.hotkey "$WALLET_HOTKEY" \
+  --log-level "$LOG_LEVEL" \
   $VALIDATOR_EXTRA_ARGS
 pm2 save
 pm2 status perturb-validator
