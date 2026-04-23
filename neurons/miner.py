@@ -58,43 +58,18 @@ def _make_subtensor(config):
 
 
 def _make_axon(wallet, config):
-    axon_config = getattr(config, "axon", None)
-    axon_kwargs = {"wallet": wallet}
-    if axon_config is not None:
-        ip = getattr(axon_config, "ip", None)
-        port = getattr(axon_config, "port", None)
-        external_ip = getattr(axon_config, "external_ip", None)
-        external_port = getattr(axon_config, "external_port", None)
-        max_workers = getattr(axon_config, "max_workers", None)
-        if ip:
-            axon_kwargs["ip"] = ip
-        if port is not None:
-            axon_kwargs["port"] = int(port)
-        if external_ip:
-            axon_kwargs["external_ip"] = external_ip
-        if external_port is not None:
-            axon_kwargs["external_port"] = int(external_port)
-        if max_workers is not None:
-            axon_kwargs["max_workers"] = int(max_workers)
-
     if hasattr(bt, "axon"):
         try:
-            return bt.axon(**axon_kwargs)
+            return bt.axon(wallet=wallet)
         except Exception:
-            try:
-                return bt.axon(wallet=wallet, config=config)
-            except Exception:
-                return bt.axon(wallet=wallet)
+            return bt.axon(wallet=wallet, config=config)
     axon_cls = getattr(bt, "Axon", None)
     if axon_cls is None:
         raise RuntimeError("No axon constructor found in bittensor.")
     try:
-        return axon_cls(**axon_kwargs)
+        return axon_cls(wallet=wallet)
     except Exception:
-        try:
-            return axon_cls(wallet=wallet, config=config)
-        except Exception:
-            return axon_cls(wallet=wallet)
+        return axon_cls(wallet=wallet, config=config)
 
 
 def _configure_log_level(level_raw: str) -> None:
@@ -237,10 +212,6 @@ class PerturbMiner:
         if self.wallet.hotkey.ss58_address not in self.metagraph.hotkeys:
             raise RuntimeError("Miner hotkey is not registered on this netuid.")
 
-        bt.logging.info(
-            f"Axon bind ip={self.config.axon.ip} port={self.config.axon.port} "
-            f"external_ip={self.config.axon.external_ip} external_port={self.config.axon.external_port}"
-        )
         bt.logging.info("Serving miner axon...")
         self.axon.serve(netuid=self.config.netuid, subtensor=self.subtensor)
         self.axon.start()
@@ -286,16 +257,6 @@ def build_config() -> typing.Any:
     if not hasattr(config, "logging"):
         config.logging = type("LoggingConfig", (), {})()
     config.logging.logging_dir = getattr(config.logging, "logging_dir", getattr(config, "logging_dir", "./logs"))
-
-    if not hasattr(config, "axon"):
-        config.axon = type("AxonConfig", (), {})()
-    config.axon.ip = getattr(config.axon, "ip", os.getenv("AXON_IP", "0.0.0.0"))
-    config.axon.port = int(getattr(config.axon, "port", os.getenv("AXON_PORT", "8091")))
-    config.axon.external_ip = getattr(config.axon, "external_ip", os.getenv("AXON_EXTERNAL_IP", None))
-    config.axon.external_port = int(
-        getattr(config.axon, "external_port", os.getenv("AXON_EXTERNAL_PORT", str(config.axon.port)))
-    )
-    config.axon.max_workers = int(getattr(config.axon, "max_workers", os.getenv("AXON_MAX_WORKERS", "10")))
 
     config.log_level = getattr(config, "log_level", os.getenv("LOG_LEVEL", "DEBUG"))
 
