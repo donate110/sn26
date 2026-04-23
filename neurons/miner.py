@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 
 from perturbnet.image_io import decode_image_b64, encode_image_b64
-from perturbnet.model import load_efficientnet_b5, resolve_target_index
+from perturbnet.model import load_efficientnet_b5, logits_for_images, predict_index, resolve_target_index
 from perturbnet.protocol import AttackChallenge
 
 
@@ -50,11 +50,17 @@ def _make_subtensor(config):
 
 def _make_axon(wallet, config):
     if hasattr(bt, "axon"):
-        return bt.axon(wallet=wallet, config=config)
+        try:
+            return bt.axon(wallet=wallet)
+        except Exception:
+            return bt.axon(wallet=wallet, config=config)
     axon_cls = getattr(bt, "Axon", None)
     if axon_cls is None:
         raise RuntimeError("No axon constructor found in bittensor.")
-    return axon_cls(wallet=wallet, config=config)
+    try:
+        return axon_cls(wallet=wallet)
+    except Exception:
+        return axon_cls(wallet=wallet, config=config)
 
 
 def _configure_log_level(level_raw: str) -> None:
@@ -120,14 +126,13 @@ class PerturbMiner:
         best_delta = 0.0
         for _ in range(steps):
             adv.requires_grad_(True)
-            logits = self.model(adv.unsqueeze(0))
+            logits = logits_for_images(model=self.model, image_bchw=adv.unsqueeze(0))
             loss = F.cross_entropy(logits, torch.tensor([target_index], device=self.device))
             grad = torch.autograd.grad(loss, adv)[0]
             adv = adv.detach() + step_size * grad.sign()
             adv = torch.max(torch.min(adv, clean + epsilon), clean - epsilon).clamp(0.0, 1.0)
 
-            with torch.no_grad():
-                pred = int(self.model(adv.unsqueeze(0)).argmax(dim=1).item())
+            pred = predict_index(model=self.model, image_chw=adv)
             delta = float((adv - clean).abs().max().item())
             if delta > best_delta:
                 best = adv.clone()
@@ -204,6 +209,17 @@ def build_config() -> bt.config:
     if not hasattr(config, "logging"):
         config.logging = type("LoggingConfig", (), {})()
     config.logging.logging_dir = getattr(config.logging, "logging_dir", getattr(config, "logging_dir", "./logs"))
+
+    if not hasattr(config, "axon"):
+        config.axon = type("AxonConfig", (), {})()
+    config.axon.ip = getattr(config.axon, "ip", os.getenv("AXON_IP", "0.0.0.0"))
+    config.axon.port = int(getattr(config.axon, "port", os.getenv("AXON_PORT", "8091")))
+    config.axon.external_ip = getattr(config.axon, "external_ip", os.getenv("AXON_EXTERNAL_IP", None))
+    config.axon.external_port = int(
+        getattr(config.axon, "external_port", os.getenv("AXON_EXTERNAL_PORT", str(config.axon.port)))
+    )
+    config.axon.max_workers = int(getattr(config.axon, "max_workers", os.getenv("AXON_MAX_WORKERS", "10")))
+
     config.log_level = getattr(config, "log_level", os.getenv("LOG_LEVEL", "DEBUG"))
 
     return config

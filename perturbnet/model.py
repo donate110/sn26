@@ -34,10 +34,18 @@ def _preprocess_for_efficientnet_b5(image_bchw: torch.Tensor) -> torch.Tensor:
     return (resized - mean) / std
 
 
-def predict_label(model: torch.nn.Module, image_chw: torch.Tensor) -> str:
+def predict_index(model: torch.nn.Module, image_chw: torch.Tensor) -> int:
     with torch.no_grad():
         logits = model(_preprocess_for_efficientnet_b5(image_chw.unsqueeze(0)))
-        idx = int(logits.argmax(dim=1).item())
+        return int(logits.argmax(dim=1).item())
+
+
+def logits_for_images(model: torch.nn.Module, image_bchw: torch.Tensor) -> torch.Tensor:
+    return model(_preprocess_for_efficientnet_b5(image_bchw))
+
+
+def predict_label(model: torch.nn.Module, image_chw: torch.Tensor) -> str:
+    idx = predict_index(model=model, image_chw=image_chw)
     if 0 <= idx < len(LABELS):
         return LABELS[idx]
     return str(idx)
