@@ -120,9 +120,9 @@ class PerturbValidator:
     def _log_step_start(self, step_name: str, **context: Any) -> None:
         if context:
             rendered = " ".join([f"{k}={v}" for k, v in context.items()])
-            bt.logging.info("[STEP_START] %s %s", step_name, rendered)
+            bt.logging.info(f"[STEP_START] {step_name} {rendered}")
         else:
-            bt.logging.info("[STEP_START] %s", step_name)
+            bt.logging.info(f"[STEP_START] {step_name}")
 
     def sync(self) -> None:
         old_n = int(self.metagraph.n)
@@ -235,7 +235,7 @@ class PerturbValidator:
                 return False
             return bool(parsed)
         except Exception as exc:
-            bt.logging.error("LLM endpoint request failed (%s); rejecting check.", exc)
+            bt.logging.error(f"LLM endpoint request failed ({exc}); rejecting check.")
             return False
 
     def _fetch_image_for_prompt(self, prompt: str, seed: int) -> str:
@@ -286,13 +286,13 @@ class PerturbValidator:
                 image_b64 = self._fetch_image_for_prompt(prompt=chosen_prompt, seed=seed)
                 effective_prompt = chosen_prompt
             except Exception as exc:
-                bt.logging.warning("Challenge image fetch failed (%s), using fallback dog image.", exc)
+                bt.logging.warning(f"Challenge image fetch failed ({exc}), using fallback dog image.")
                 try:
                     self._log_step_start("challenge_load_fallback_image", label=C.FALLBACK_LABEL)
                     image_b64 = self._load_fallback_image_b64()
                     effective_prompt = C.FALLBACK_LABEL
                 except Exception as fallback_exc:
-                    bt.logging.warning("Fallback image load failed, retrying: %s", fallback_exc)
+                    bt.logging.warning(f"Fallback image load failed, retrying: {fallback_exc}")
                     continue
 
             epsilon = self._sample_epsilon(seed)
@@ -305,15 +305,13 @@ class PerturbValidator:
                 predicted = predict_label(self.model, image)
                 predicted_label = normalize_prediction_label(predicted)
             except Exception as exc:
-                bt.logging.warning("Challenge decode/model validation failed, retrying: %s", exc)
+                bt.logging.warning(f"Challenge decode/model validation failed, retrying: {exc}")
                 continue
 
             # Verify the candidate by semantically checking model output against the API prompt label.
             if not self._llm_endpoint_check(predicted_label, effective_prompt):
                 bt.logging.debug(
-                    "Challenge rejected by classifier consistency: pred=%s expected=%s",
-                    predicted_label,
-                    effective_prompt,
+                    f"Challenge rejected by classifier consistency: pred={predicted_label} expected={effective_prompt}"
                 )
                 continue
 
@@ -464,7 +462,7 @@ class PerturbValidator:
             eligible.append((uid, avg_score))
 
         if not eligible:
-            bt.logging.warning("No eligible miners with processed_count >= %d", min_processed)
+            bt.logging.warning(f"No eligible miners with processed_count >= {min_processed}")
             return
 
         eligible.sort(key=lambda x: (x[1], -x[0]), reverse=True)
@@ -504,7 +502,7 @@ class PerturbValidator:
         if ok:
             bt.logging.info("set_weights success")
         else:
-            bt.logging.error("set_weights failed: %s", msg)
+            bt.logging.error(f"set_weights failed: {msg}")
 
     def run(self) -> None:
         self._log_step_start("validator_boot")
@@ -513,7 +511,7 @@ class PerturbValidator:
             raise RuntimeError("Validator hotkey is not registered on this netuid.")
 
         tempo = self.subtensor.get_subnet_hyperparameters(self.config.netuid).tempo
-        bt.logging.info("Validator started with tempo=%s", tempo)
+        bt.logging.info(f"Validator started with tempo={tempo}")
 
         while True:
             try:
@@ -524,10 +522,7 @@ class PerturbValidator:
                 self._log_step_start("loop_generate_challenge", block=block)
                 challenge = self.generate_challenge(block=block)
                 bt.logging.info(
-                    "Challenge task=%s prompt=%s eps=%.4f",
-                    challenge.task_id,
-                    challenge.prompt,
-                    challenge.epsilon,
+                    f"Challenge task={challenge.task_id} prompt={challenge.prompt} eps={challenge.epsilon:.4f}"
                 )
 
                 self._log_step_start("loop_discover_miners")
@@ -544,10 +539,7 @@ class PerturbValidator:
                     time.sleep(self.config.perturb.query_interval_seconds)
                     continue
                 bt.logging.info(
-                    "Selected %d miners (valuable pool=%d, total pool=%d)",
-                    len(miner_uids),
-                    len(valuable_uids),
-                    len(available_uids),
+                    f"Selected {len(miner_uids)} miners (valuable pool={len(valuable_uids)}, total pool={len(available_uids)})"
                 )
 
                 self._log_step_start("loop_query_miners", selected_count=len(miner_uids))
@@ -569,11 +561,7 @@ class PerturbValidator:
                         )
                     rewards.append(score)
                     bt.logging.info(
-                        "uid=%s status=%s score=%.6f processed=%d",
-                        uid,
-                        status_code,
-                        score,
-                        int(self.processed_counts[uid]) + 1,
+                        f"uid={uid} status={status_code} score={score:.6f} processed={int(self.processed_counts[uid]) + 1}"
                     )
 
                 self._log_step_start("loop_update_histories")
@@ -594,7 +582,7 @@ class PerturbValidator:
                 bt.logging.info("Validator stopped by user.")
                 break
             except Exception as exc:
-                bt.logging.error("Validator loop error: %s", exc)
+                bt.logging.error(f"Validator loop error: {exc}")
                 time.sleep(5)
 
 
