@@ -161,7 +161,7 @@ Important validator-specific fields:
 ### 3) Start validator stack (llm_endpoint + validator)
 
 ```bash
-bash ./scripts/run_llm_endpoint.sh && bash ./scripts/run_validator.sh
+bash ./scripts/run_validator.sh
 ```
 
 Expected log behavior:

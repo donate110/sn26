@@ -34,16 +34,21 @@ if [[ -z "$WALLET_NAME" || -z "$WALLET_HOTKEY" ]]; then
   exit 1
 fi
 
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  echo "Python interpreter not found: $PYTHON_BIN"
+  exit 1
+fi
+
+if [[ ! -d ".venv" ]]; then
+  "$PYTHON_BIN" -m venv .venv
+fi
+
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install -e .
+
 if [[ "${1:-}" == "--foreground" ]]; then
-  if [[ ! -d ".venv" ]]; then
-    "$PYTHON_BIN" -m venv .venv
-  fi
-
-  source .venv/bin/activate
-  python -m pip install --upgrade pip
-  python -m pip install -r requirements.txt
-  python -m pip install -e .
-
   echo "Starting miner (wallet=$WALLET_NAME hotkey=$WALLET_HOTKEY netuid=$NETUID network=$NETWORK)..."
   python neurons/miner.py \
     --netuid "$NETUID" \
@@ -56,9 +61,14 @@ fi
 
 echo "Starting miner with PM2..."
 if pm2 describe perturb-miner >/dev/null 2>&1; then
-  pm2 restart perturb-miner
-else
-  pm2 start "./scripts/run_miner.sh" --name perturb-miner --interpreter bash -- --foreground
+  pm2 delete perturb-miner
 fi
+pm2 start ".venv/bin/python" --name perturb-miner -- \
+  neurons/miner.py \
+  --netuid "$NETUID" \
+  --network "$NETWORK" \
+  --wallet.name "$WALLET_NAME" \
+  --wallet.hotkey "$WALLET_HOTKEY" \
+  $MINER_EXTRA_ARGS
 pm2 save
 pm2 status perturb-miner

@@ -91,10 +91,20 @@ if [[ "${1:-}" == "--foreground" ]]; then
 fi
 
 echo "Starting llm_endpoint with PM2..."
-if pm2 describe perturb-llm-endpoint >/dev/null 2>&1; then
-  pm2 restart perturb-llm-endpoint
-else
-  pm2 start "./scripts/run_llm_endpoint.sh" --name perturb-llm-endpoint --interpreter bash -- --foreground
+ensure_ollama
+if [[ ! -d ".venv" ]]; then
+  "$PYTHON_BIN" -m venv .venv
 fi
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
+if pm2 describe perturb-llm-endpoint >/dev/null 2>&1; then
+  pm2 delete perturb-llm-endpoint
+fi
+pm2 start ".venv/bin/python" --name perturb-llm-endpoint -- \
+  -m uvicorn tools.llm_endpoint_service:app \
+  --host "$LLM_ENDPOINT_HOST" \
+  --port "$LLM_ENDPOINT_PORT"
 pm2 save
 pm2 status perturb-llm-endpoint
