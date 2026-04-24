@@ -132,6 +132,7 @@ class PerturbValidator:
 
         self.processed_counts = np.zeros(int(self.metagraph.n), dtype=np.int32)
         self.score_histories: list[list[float]] = [[] for _ in range(int(self.metagraph.n))]
+        self.uid_hotkeys: list[str] = list(self.metagraph.hotkeys[: int(self.metagraph.n)])
 
         self._load_state()
 
@@ -155,6 +156,30 @@ class PerturbValidator:
                 self.score_histories.extend([[] for _ in range(new_n - len(self.score_histories))])
             else:
                 self.score_histories = self.score_histories[:new_n]
+            if new_n > len(self.uid_hotkeys):
+                self.uid_hotkeys.extend([""] * (new_n - len(self.uid_hotkeys)))
+            else:
+                self.uid_hotkeys = self.uid_hotkeys[:new_n]
+        self._reconcile_uid_identities()
+
+    def _reset_uid_stats(self, uid: int, reason: str) -> None:
+        self.processed_counts[uid] = 0
+        self.score_histories[uid] = []
+        bt.logging.info(f"Reset uid={uid} stats due to {reason}.")
+
+    def _reconcile_uid_identities(self) -> None:
+        n = int(self.metagraph.n)
+        if len(self.uid_hotkeys) < n:
+            self.uid_hotkeys.extend([""] * (n - len(self.uid_hotkeys)))
+        elif len(self.uid_hotkeys) > n:
+            self.uid_hotkeys = self.uid_hotkeys[:n]
+
+        for uid in range(n):
+            current_hotkey = str(self.metagraph.hotkeys[uid])
+            previous_hotkey = self.uid_hotkeys[uid]
+            if previous_hotkey and previous_hotkey != current_hotkey:
+                self._reset_uid_stats(uid, reason="hotkey_changed")
+            self.uid_hotkeys[uid] = current_hotkey
 
     def _load_state(self) -> None:
         if not os.path.exists(self.state_path):
@@ -176,6 +201,15 @@ class PerturbValidator:
             if isinstance(raw, list):
                 self.score_histories[idx] = [float(x) for x in raw[-self.config.perturb.history_size :]]
 
+        saved_hotkeys = state.get("uid_hotkeys", [])
+        if isinstance(saved_hotkeys, list):
+            copied_keys = min(len(saved_hotkeys), len(self.uid_hotkeys))
+            for idx in range(copied_keys):
+                value = saved_hotkeys[idx]
+                if isinstance(value, str):
+                    self.uid_hotkeys[idx] = value
+        self._reconcile_uid_identities()
+
     def _save_state(self) -> None:
         directory = os.path.dirname(self.state_path)
         if directory:
@@ -185,6 +219,7 @@ class PerturbValidator:
             "last_weight_block": int(self.last_weight_block),
             "processed_counts": self.processed_counts.tolist(),
             "score_histories": [history[-self.config.perturb.history_size :] for history in self.score_histories],
+            "uid_hotkeys": self.uid_hotkeys,
         }
         with open(self.state_path, "w", encoding="utf-8") as handle:
             json.dump(payload, handle)
@@ -366,10 +401,34 @@ class PerturbValidator:
         if not candidate_uids:
             return []
         valuable = self._valuable_miner_uids(candidate_uids)
-        pool = list(valuable) if valuable else list(candidate_uids)
+        pool = list(candidate_uids)
         k = min(int(self.config.perturb.k_miners), len(pool))
         rng = random.Random(seed)
-        return sorted(rng.sample(pool, k=k))
+        if k <= 0:
+            return []
+        if not valuable:
+            return sorted(rng.sample(pool, k=k))
+
+        valuable_set = set(valuable)
+        newcomers = [uid for uid in pool if uid not in valuable_set]
+        ratio = float(max(0.0, min(1.0, self.config.perturb.miner_exploration_ratio)))
+        explore_k = min(len(newcomers), int(round(k * ratio)))
+        if newcomers and ratio > 0.0 and explore_k == 0:
+            explore_k = 1
+        exploit_k = min(len(valuable), k - explore_k)
+        if exploit_k + explore_k < k:
+            explore_k = min(len(newcomers), explore_k + (k - (exploit_k + explore_k)))
+
+        selected: list[int] = []
+        if exploit_k > 0:
+            selected.extend(rng.sample(list(valuable), k=exploit_k))
+        if explore_k > 0:
+            selected.extend(rng.sample(newcomers, k=explore_k))
+
+        if len(selected) < k:
+            remaining = [uid for uid in pool if uid not in set(selected)]
+            selected.extend(rng.sample(remaining, k=min(k - len(selected), len(remaining))))
+        return sorted(selected)
 
     async def _query_miners(self, uids: Sequence[int], challenge: ChallengeSpec):
         self._log_step_start(
@@ -448,24 +507,9 @@ class PerturbValidator:
         return C.PERTURBATION_WEIGHT * perturbation_score + C.SPEED_WEIGHT * speed_score
 
     def _update_histories(self, uids: Sequence[int], rewards: Sequence[float]) -> None:
-        history_size = int(self.config.perturb.history_size)
         for uid, reward in zip(uids, rewards):
             self.processed_counts[uid] += 1
             self.score_histories[uid].append(float(reward))
-            if len(self.score_histories[uid]) > history_size:
-                self.score_histories[uid] = self.score_histories[uid][-history_size:]
-
-    def _rank_points(self, rank: int) -> float:
-        # rank is 0-based among eligible miners sorted by avg score
-        if rank == 0:
-            return 50.0
-        if rank == 1:
-            return 30.0
-        if rank == 2:
-            return 10.0
-        if rank <= 9:
-            return 5.0
-        return 3.0
 
     def _set_weights(self) -> None:
         self._log_step_start(
@@ -474,46 +518,81 @@ class PerturbValidator:
             history_size=self.config.perturb.history_size,
         )
         eligible: list[tuple[int, float]] = []
-        min_processed = int(self.config.perturb.min_processed_count)
         history_size = int(self.config.perturb.history_size)
+        min_processed = int(self.config.perturb.min_processed_count)
         for uid in range(int(self.metagraph.n)):
-            if self.processed_counts[uid] <= min_processed:
+            if int(self.processed_counts[uid]) <= min_processed:
                 continue
             history = self.score_histories[uid]
-            if not history:
+            if len(history) < history_size:
                 continue
             tail = history[-history_size:]
-            avg_score = float(sum(tail) / max(1, len(tail)))
+            avg_score = float(sum(tail) / history_size)
             eligible.append((uid, avg_score))
 
         if not eligible:
-            bt.logging.warning(f"No eligible miners with processed_count >= {min_processed}")
+            bt.logging.warning(f"No eligible miners with processed_count > {min_processed}.")
             return
 
         eligible.sort(key=lambda x: (x[1], -x[0]), reverse=True)
+        n_eligible = len(eligible)
         avg_raw = np.zeros(int(self.metagraph.n), dtype=np.float32)
-        bonus_raw = np.zeros(int(self.metagraph.n), dtype=np.float32)
-        for rank, (uid, avg_score) in enumerate(eligible):
+        emission_raw = np.zeros(int(self.metagraph.n), dtype=np.float32)
+
+        rank_to_uid: dict[int, int] = {}
+        for rank0, (uid, avg_score) in enumerate(eligible):
+            rank = rank0 + 1
+            rank_to_uid[rank] = uid
             avg_raw[uid] = max(0.0, float(avg_score))
-            bonus_raw[uid] = float(self._rank_points(rank))
+
+        # Top-3 fixed emission.
+        if n_eligible >= 1:
+            emission_raw[rank_to_uid[1]] = 0.50
+        if n_eligible >= 2:
+            emission_raw[rank_to_uid[2]] = 0.30
+        if n_eligible >= 3:
+            emission_raw[rank_to_uid[3]] = 0.10
+
+        # Ranks 4-10 share 5% with inverse-rank decay.
+        start_4_10 = 4
+        end_4_10 = min(10, n_eligible)
+        if end_4_10 >= start_4_10:
+            denom_4_10 = sum((1.0 / r) for r in range(start_4_10, end_4_10 + 1))
+            if denom_4_10 > 0:
+                for r in range(start_4_10, end_4_10 + 1):
+                    emission_raw[rank_to_uid[r]] = float(0.05 * (1.0 / r) / denom_4_10)
+
+        # Ranks 11+ share 5% with inverse-rank decay.
+        start_11 = 11
+        if n_eligible >= start_11:
+            denom_11p = sum((1.0 / r) for r in range(start_11, n_eligible + 1))
+            if denom_11p > 0:
+                for r in range(start_11, n_eligible + 1):
+                    emission_raw[rank_to_uid[r]] = float(0.05 * (1.0 / r) / denom_11p)
 
         avg_total = float(avg_raw.sum())
-        bonus_total = float(bonus_raw.sum())
-        if avg_total <= 0.0 or bonus_total <= 0.0:
-            bt.logging.warning("Average or rank-bonus totals are zero; skipping set_weights.")
+        emission_total = float(emission_raw.sum())
+        if avg_total <= 0.0 or emission_total <= 0.0:
+            bt.logging.warning("Average or emission totals are zero; skipping set_weights.")
             return
 
         avg_norm = avg_raw / avg_total
-        bonus_norm = bonus_raw / bonus_total
-        gamma = float(C.GAMMA_HISTORY_WEIGHT)
-        raw = gamma * avg_norm + (1.0 - gamma) * bonus_norm
+        emission_norm = emission_raw / emission_total
+        gamma = 0.7
+        raw = gamma * avg_norm + (1.0 - gamma) * emission_norm
 
         total = float(raw.sum())
         if total <= 0.0:
-            bt.logging.warning("Rank-based weights are all zero; skipping set_weights.")
+            bt.logging.warning("Blended weights are all zero; skipping set_weights.")
             return
 
         normalized = raw / total
+        for rank0, (uid, avg_score) in enumerate(eligible):
+            rank = rank0 + 1
+            bt.logging.info(
+                f"rank={rank} uid={uid} avg100={avg_score:.6f} emission={emission_raw[uid]:.6f} final_weight={normalized[uid]:.6f}"
+            )
+
         uids = list(range(len(normalized)))
         weights = [float(v) for v in normalized.tolist()]
         ok, msg = self.subtensor.set_weights(

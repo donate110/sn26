@@ -80,6 +80,7 @@ LLM_ENDPOINT_MODEL = _env_first(
 MIN_LINF_DELTA = _env_float("PERTURB_MIN_LINF_DELTA", 0.002)
 MAX_LINF_DELTA = _env_float("PERTURB_MAX_LINF_DELTA", 0.12)
 MAX_CHALLENGE_ATTEMPTS = _env_int("PERTURB_MAX_CHALLENGE_ATTEMPTS", 12)
+MINER_EXPLORATION_RATIO = _env_float("PERTURB_MINER_EXPLORATION_RATIO", 0.20)
 
 VALIDATOR_CONFIG = {
     "image_endpoint": IMAGE_ENDPOINT,
@@ -94,6 +95,7 @@ VALIDATOR_CONFIG = {
     "min_linf_delta": MIN_LINF_DELTA,
     "max_linf_delta": MAX_LINF_DELTA,
     "max_challenge_attempts": MAX_CHALLENGE_ATTEMPTS,
+    "miner_exploration_ratio": MINER_EXPLORATION_RATIO,
 }
 
 # Validator scoring defaults.
