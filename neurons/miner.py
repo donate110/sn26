@@ -58,18 +58,19 @@ def _make_subtensor(config):
 
 
 def _make_axon(wallet, config):
+    resolved_config = config() if callable(config) else config
     if hasattr(bt, "axon"):
         try:
-            return bt.axon(wallet=wallet)
+            return bt.axon(wallet=wallet, config=resolved_config)
         except Exception:
-            return bt.axon(wallet=wallet, config=config)
+            return bt.axon(wallet=wallet)
     axon_cls = getattr(bt, "Axon", None)
     if axon_cls is None:
         raise RuntimeError("No axon constructor found in bittensor.")
     try:
-        return axon_cls(wallet=wallet)
+        return axon_cls(wallet=wallet, config=resolved_config)
     except Exception:
-        return axon_cls(wallet=wallet, config=config)
+        return axon_cls(wallet=wallet)
 
 
 def _configure_log_level(level_raw: str) -> None:
@@ -110,6 +111,13 @@ class PerturbMiner:
             priority_fn=self.priority,
         )
 
+    def _log_step_start(self, step_name: str, **context: typing.Any) -> None:
+        if context:
+            rendered = " ".join([f"{k}={v}" for k, v in context.items()])
+            bt.logging.info(f"[STEP_START] {step_name} {rendered}")
+        else:
+            bt.logging.info(f"[STEP_START] {step_name}")
+
     def _init_subtensor_with_retry(self):
         max_attempts = int(os.getenv("SUBTENSOR_CONNECT_RETRIES", "5"))
         retry_delay_seconds = float(os.getenv("SUBTENSOR_CONNECT_RETRY_SECONDS", "4"))
@@ -144,13 +152,23 @@ class PerturbMiner:
         self.metagraph.sync(subtensor=self.subtensor)
 
     async def forward(self, synapse: AttackChallenge) -> AttackChallenge:
+        self._log_step_start(
+            "miner_forward",
+            task_id=getattr(synapse, "task_id", "unknown"),
+            norm_type=getattr(synapse, "norm_type", "unknown"),
+            epsilon=getattr(synapse, "epsilon", "unknown"),
+        )
         if synapse.norm_type != "Linf":
+            bt.logging.info(f"Skipping task={getattr(synapse, 'task_id', 'unknown')}: unsupported norm_type={synapse.norm_type}")
             synapse.perturbed_image_b64 = synapse.clean_image_b64
             return synapse
 
         clean = decode_image_b64(synapse.clean_image_b64).to(self.device)
         target_index = resolve_target_index(synapse.true_label)
         if target_index is None:
+            bt.logging.warning(
+                f"Skipping task={getattr(synapse, 'task_id', 'unknown')}: unresolved true_label={getattr(synapse, 'true_label', None)}"
+            )
             synapse.perturbed_image_b64 = synapse.clean_image_b64
             return synapse
 
@@ -163,6 +181,7 @@ class PerturbMiner:
         adv = clean.clone().detach()
         best = adv.clone()
         best_delta = 0.0
+        final_pred = target_index
         for _ in range(steps):
             adv.requires_grad_(True)
             logits = logits_for_images(model=self.model, image_bchw=adv.unsqueeze(0))
@@ -172,6 +191,7 @@ class PerturbMiner:
             adv = torch.max(torch.min(adv, clean + epsilon), clean - epsilon).clamp(0.0, 1.0)
 
             pred = predict_index(model=self.model, image_chw=adv)
+            final_pred = pred
             delta = float((adv - clean).abs().max().item())
             if delta > best_delta:
                 best = adv.clone()
@@ -182,29 +202,51 @@ class PerturbMiner:
 
         adv = best
         synapse.perturbed_image_b64 = encode_image_b64(adv)
+        bt.logging.info(
+            f"Finished task={getattr(synapse, 'task_id', 'unknown')} target_idx={target_index} "
+            f"final_pred={final_pred} best_delta={best_delta:.6f} min_delta={min_delta:.6f}"
+        )
         return synapse
 
     async def blacklist(self, synapse: AttackChallenge) -> typing.Tuple[bool, str]:
+        self._log_step_start(
+            "miner_blacklist",
+            task_id=getattr(synapse, "task_id", "unknown"),
+            caller_hotkey=getattr(getattr(synapse, "dendrite", None), "hotkey", None),
+        )
         if synapse.dendrite is None or synapse.dendrite.hotkey is None:
+            bt.logging.warning("Blacklist reject: missing caller hotkey")
             return True, "Missing caller hotkey"
 
         hotkey = synapse.dendrite.hotkey
         if hotkey not in self.metagraph.hotkeys:
+            bt.logging.warning(f"Blacklist reject: unregistered caller hotkey={hotkey}")
             return True, "Unregistered caller"
 
         uid = self.metagraph.hotkeys.index(hotkey)
         if not self.metagraph.validator_permit[uid]:
+            bt.logging.warning(f"Blacklist reject: caller uid={uid} lacks validator permit")
             return True, "Caller is not validator"
 
+        bt.logging.info(f"Blacklist allow: caller uid={uid} hotkey={hotkey}")
         return False, "OK"
 
     async def priority(self, synapse: AttackChallenge) -> float:
+        self._log_step_start(
+            "miner_priority",
+            task_id=getattr(synapse, "task_id", "unknown"),
+            caller_hotkey=getattr(getattr(synapse, "dendrite", None), "hotkey", None),
+        )
         if synapse.dendrite is None or synapse.dendrite.hotkey is None:
+            bt.logging.info("Priority=0.0: missing caller hotkey")
             return 0.0
         if synapse.dendrite.hotkey not in self.metagraph.hotkeys:
+            bt.logging.info(f"Priority=0.0: unknown hotkey={synapse.dendrite.hotkey}")
             return 0.0
         uid = self.metagraph.hotkeys.index(synapse.dendrite.hotkey)
-        return float(self.metagraph.S[uid])
+        priority = float(self.metagraph.S[uid])
+        bt.logging.info(f"Priority computed: uid={uid} priority={priority:.6f}")
+        return priority
 
     def run(self) -> None:
         self.sync()
@@ -212,7 +254,9 @@ class PerturbMiner:
         if self.wallet.hotkey.ss58_address not in self.metagraph.hotkeys:
             raise RuntimeError("Miner hotkey is not registered on this netuid.")
 
-        bt.logging.info("Serving miner axon...")
+        bt.logging.info(
+            f"Serving miner axon {self.axon} on network: {self.config.subtensor.network} with netuid: {self.config.netuid}"
+        )
         self.axon.serve(netuid=self.config.netuid, subtensor=self.subtensor)
         self.axon.start()
 
@@ -236,6 +280,12 @@ def build_config() -> typing.Any:
     parser.add_argument("--wallet.hotkey", dest="wallet_hotkey", type=str, default=os.getenv("HOTKEY_NAME", "default"))
     parser.add_argument("--logging-dir", dest="logging_dir", type=str, default=os.getenv("LOGGING_DIR", "./logs"))
     parser.add_argument("--log-level", dest="log_level", type=str, default=os.getenv("LOG_LEVEL", "DEBUG"))
+    parser.add_argument(
+        "--axon.port",
+        dest="axon_port",
+        type=int,
+        default=int(os.getenv("MINER_PORT", os.getenv("AXON_PORT", "9000"))),
+    )
 
     if hasattr(bt, "config"):
         config = bt.config(parser)
@@ -257,6 +307,10 @@ def build_config() -> typing.Any:
     if not hasattr(config, "logging"):
         config.logging = type("LoggingConfig", (), {})()
     config.logging.logging_dir = getattr(config.logging, "logging_dir", getattr(config, "logging_dir", "./logs"))
+
+    if not hasattr(config, "axon"):
+        config.axon = type("AxonConfig", (), {})()
+    config.axon.port = int(getattr(config.axon, "port", getattr(config, "axon_port", 9000)))
 
     config.log_level = getattr(config, "log_level", os.getenv("LOG_LEVEL", "DEBUG"))
 
