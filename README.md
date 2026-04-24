@@ -64,21 +64,29 @@ This repository provides:
 
 ## Common Installation (Do Once)
 
-Run these once before role-specific setup:
+Run role-specific setup once before starting nodes:
 
 ```bash
 git clone https://github.com/0xsigurd/Perturb
 cd Perturb
-bash ./scripts/setup_common.sh
 ```
 
-`setup_common.sh` now performs all shared bootstrap steps automatically:
+For miner setup:
 
-- installs PM2
-- installs Ollama (if missing)
-- starts Ollama server under PM2 (`perturb-ollama`) if needed
-- pulls configured model (`PERTURB_LLM_ENDPOINT_MODEL`, default `qwen2.5:1.5b-instruct`)
-- creates `.venv` and installs Python/Bittensor dependencies
+```bash
+bash ./scripts/setup_common.sh miner
+```
+
+For validator setup:
+
+```bash
+bash ./scripts/setup_common.sh validator
+```
+
+`setup_common.sh` behavior by role:
+
+- `miner`: creates `.venv`, installs Python/Bittensor dependencies only
+- `validator`: also installs PM2, Ollama, starts `perturb-ollama`, and pulls `PERTURB_LLM_ENDPOINT_MODEL`
 
 If `npm: command not found`, install Node.js first, then rerun:
 
@@ -88,7 +96,7 @@ macOS (Homebrew):
 brew install node
 node --version
 npm --version
-bash ./scripts/setup_common.sh
+bash ./scripts/setup_common.sh validator
 ```
 
 Ubuntu/Debian:
@@ -98,7 +106,7 @@ sudo apt-get update
 sudo apt-get install -y nodejs npm
 node --version
 npm --version
-bash ./scripts/setup_common.sh
+bash ./scripts/setup_common.sh validator
 ```
 
 ## Installation and Setup (Validator Side)
@@ -326,6 +334,6 @@ Use `docs/READINESS_CHECKLIST.md` before long-run validation or deployment.
 - `scripts/run_llm_endpoint.sh`: start/restart llm endpoint with PM2 (auto-ensures Ollama + model)
 - `scripts/run_validator.sh`: start/restart validator with PM2
 - `scripts/run_miner.sh`: start/restart miner with PM2
-- `scripts/setup_common.sh`: bootstrap PM2 + Ollama + model + Python/Bittensor editable install
+- `scripts/setup_common.sh`: role-aware bootstrap (`miner` = Python deps only, `validator` = adds PM2/Ollama/model)
 - `scripts/integration_smoke_test.py`: local integration test
 
