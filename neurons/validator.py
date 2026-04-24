@@ -395,7 +395,7 @@ class PerturbValidator:
 
     def _valuable_miner_uids(self, candidate_uids: Sequence[int]) -> list[int]:
         min_processed = int(self.config.perturb.min_processed_count)
-        return [uid for uid in candidate_uids if int(self.processed_counts[uid]) > min_processed]
+        return [uid for uid in candidate_uids if int(self.processed_counts[uid]) >= min_processed]
 
     def _select_random_miners(self, candidate_uids: Sequence[int], seed: int) -> list[int]:
         if not candidate_uids:
@@ -521,7 +521,7 @@ class PerturbValidator:
         history_size = int(self.config.perturb.history_size)
         min_processed = int(self.config.perturb.min_processed_count)
         for uid in range(int(self.metagraph.n)):
-            if int(self.processed_counts[uid]) <= min_processed:
+            if int(self.processed_counts[uid]) < min_processed:
                 continue
             history = self.score_histories[uid]
             if len(history) < history_size:
@@ -531,19 +531,17 @@ class PerturbValidator:
             eligible.append((uid, avg_score))
 
         if not eligible:
-            bt.logging.warning(f"No eligible miners with processed_count > {min_processed}.")
+            bt.logging.warning(f"No eligible miners with processed_count >= {min_processed}.")
             return
 
         eligible.sort(key=lambda x: (x[1], -x[0]), reverse=True)
         n_eligible = len(eligible)
-        avg_raw = np.zeros(int(self.metagraph.n), dtype=np.float32)
         emission_raw = np.zeros(int(self.metagraph.n), dtype=np.float32)
 
         rank_to_uid: dict[int, int] = {}
         for rank0, (uid, avg_score) in enumerate(eligible):
             rank = rank0 + 1
             rank_to_uid[rank] = uid
-            avg_raw[uid] = max(0.0, float(avg_score))
 
         # Top-3 fixed emission.
         if n_eligible >= 1:
@@ -570,23 +568,47 @@ class PerturbValidator:
                 for r in range(start_11, n_eligible + 1):
                     emission_raw[rank_to_uid[r]] = float(0.05 * (1.0 / r) / denom_11p)
 
-        avg_total = float(avg_raw.sum())
-        emission_total = float(emission_raw.sum())
-        if avg_total <= 0.0 or emission_total <= 0.0:
-            bt.logging.warning("Average or emission totals are zero; skipping set_weights.")
+        # Only miners with positive average score may receive non-zero emissions.
+        positive_uids = [uid for uid, avg_score in eligible if avg_score > 0.0]
+        if not positive_uids:
+            bt.logging.warning("No miners with positive average score; setting all weights to zero.")
+            zero_weights = np.zeros(int(self.metagraph.n), dtype=np.float32)
+            uids = list(range(len(zero_weights)))
+            ok, msg = self.subtensor.set_weights(
+                wallet=self.wallet,
+                netuid=self.config.netuid,
+                uids=uids,
+                weights=[float(v) for v in zero_weights.tolist()],
+                wait_for_inclusion=False,
+                wait_for_finalization=False,
+            )
+            if ok:
+                bt.logging.info("set_weights success (all zero)")
+            else:
+                bt.logging.error(f"set_weights failed (all zero): {msg}")
+            return
+        active_emission_total = float(sum(float(emission_raw[uid]) for uid in positive_uids))
+        if active_emission_total <= 0.0:
+            bt.logging.warning("No positive-score miners in weighted rank buckets; setting all weights to zero.")
+            zero_weights = np.zeros(int(self.metagraph.n), dtype=np.float32)
+            uids = list(range(len(zero_weights)))
+            ok, msg = self.subtensor.set_weights(
+                wallet=self.wallet,
+                netuid=self.config.netuid,
+                uids=uids,
+                weights=[float(v) for v in zero_weights.tolist()],
+                wait_for_inclusion=False,
+                wait_for_finalization=False,
+            )
+            if ok:
+                bt.logging.info("set_weights success (all zero)")
+            else:
+                bt.logging.error(f"set_weights failed (all zero): {msg}")
             return
 
-        avg_norm = avg_raw / avg_total
-        emission_norm = emission_raw / emission_total
-        gamma = 0.7
-        raw = gamma * avg_norm + (1.0 - gamma) * emission_norm
-
-        total = float(raw.sum())
-        if total <= 0.0:
-            bt.logging.warning("Blended weights are all zero; skipping set_weights.")
-            return
-
-        normalized = raw / total
+        normalized = np.zeros(int(self.metagraph.n), dtype=np.float32)
+        for uid in positive_uids:
+            normalized[uid] = float(emission_raw[uid]) / active_emission_total
         for rank0, (uid, avg_score) in enumerate(eligible):
             rank = rank0 + 1
             bt.logging.info(
