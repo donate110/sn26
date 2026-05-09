@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 SCRIPT_DIR="$ROOT_DIR/scripts"
-ENV_FILE="$SCRIPT_DIR/miner.h03.env"
+ENV_FILE="$SCRIPT_DIR/miner.env"
 EXAMPLE_ENV_FILE="$SCRIPT_DIR/miner.env.example"
 
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -64,10 +64,10 @@ if [[ "${1:-}" == "--foreground" ]]; then
 fi
 
 echo "Starting miner with PM2..."
-if pm2 describe perturb-miner-h03 >/dev/null 2>&1; then
-  pm2 delete perturb-miner-h03
+if pm2 describe perturb-miner-h02 >/dev/null 2>&1; then
+  pm2 delete perturb-miner-h02
 fi
-pm2 start ".venv/bin/python" --name perturb-miner-h03 -- \
+pm2 start ".venv/bin/python" --name perturb-miner-h02 -- \
   neurons/miner.py \
   $MINER_EXTRA_ARGS \
   --netuid "$NETUID" \
@@ -77,4 +77,4 @@ pm2 start ".venv/bin/python" --name perturb-miner-h03 -- \
   --axon.port "$MINER_PORT" \
   --log-level "$LOG_LEVEL"
 pm2 save
-pm2 status perturb-miner-h03
+pm2 status perturb-miner-h02

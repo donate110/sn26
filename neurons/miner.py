@@ -235,8 +235,8 @@ class PerturbMiner:
             adv_batch = clean_batch + perturbation_batch
             adv_batch = torch.clamp(adv_batch, 0.0, 1.0)
             
-            # Check success for each path every few steps
-            if step % 5 == 0 or step == steps - 1:
+            # Speed optimization: Check success less frequently (every 3 steps vs 5)
+            if step % 3 == 0 or step == steps - 1:
                 with torch.no_grad():
                     preds_logits = logits_for_images(model=self.model, image_bchw=adv_batch)
                     preds = preds_logits.argmax(dim=1)
@@ -378,7 +378,7 @@ class PerturbMiner:
     ) -> torch.Tensor:
         """
         Binary search to find minimal perturbation that still causes misclassification.
-        Enhanced with 20 iterations for 96GB VRAM systems (~0.1% precision).
+        Optimized for speed with 10 iterations (balances precision vs response time).
         """
         current_norm = float((adv - clean).abs().max().item())
         
@@ -389,8 +389,8 @@ class PerturbMiner:
         high = current_norm
         best = adv.clone()
         
-        # Increased iterations from 10 to 20 - we have the compute power!
-        for iteration in range(20):
+        # Speed-optimized: 10 iterations provides good precision while maintaining fast response
+        for iteration in range(10):
             mid = (low + high) / 2.0
             
             # Scale perturbation down to mid
@@ -436,46 +436,115 @@ class PerturbMiner:
         epsilon = float(synapse.epsilon)
         min_delta = float(getattr(synapse, "min_delta", 0.002))
 
-        bt.logging.debug(f"Starting ENSEMBLE attack with 96GB VRAM optimization")
+        bt.logging.debug(f"Starting PARALLEL GPU attack (98GB VRAM utilization)")
 
         # Phase 1: Find top-5 target classes for batch processing
         top_targets = self._find_top_k_targets(clean, true_index, k=5)
         bt.logging.debug(f"Top-5 target classes: {top_targets} (original: {true_index})")
 
-        # Phase 2: PARALLEL ENSEMBLE ATTACK - Leverage massive VRAM
-        # Run multiple attack strategies and pick the best result
-        
-        # Attack 1: Batch MI-FGSM on top-5 targets (uses ~15GB VRAM)
-        adv_mifgsm, success_mifgsm, norm_mifgsm = self._batch_targeted_mifgsm_attack(
-            clean=clean,
-            true_index=true_index,
-            target_indices=top_targets,
-            epsilon=epsilon,
-            min_delta=min_delta,
-            steps=30,
-        )
+        # Phase 2: PARALLEL GPU EXECUTION - Run MI-FGSM and PGD simultaneously
+        # Create CUDA streams for parallel execution
+        if torch.cuda.is_available():
+            stream_mifgsm = torch.cuda.Stream()
+            stream_pgd = torch.cuda.Stream()
+        else:
+            stream_mifgsm = None
+            stream_pgd = None
 
-        # Attack 2: Adaptive PGD on best target (uses ~8GB VRAM)
+        # Prepare shared data
         best_target = top_targets[0] if top_targets else true_index
-        adv_pgd, success_pgd, norm_pgd = self._adaptive_pgd_attack(
-            clean=clean,
-            true_index=true_index,
-            target_index=best_target,
-            epsilon=epsilon,
-            min_delta=min_delta,
-            steps=40,
-        )
 
-        # Attack 3: C&W style on 2nd best target (uses ~10GB VRAM)
-        second_target = top_targets[1] if len(top_targets) > 1 else best_target
-        adv_cw, success_cw, norm_cw = self._cw_style_attack(
-            clean=clean,
-            true_index=true_index,
-            target_index=second_target,
-            epsilon=epsilon,
-            min_delta=min_delta,
-            steps=50,
-        )
+        # Execute attacks in parallel using CUDA streams
+        if stream_mifgsm and stream_pgd:
+            bt.logging.debug("Launching parallel GPU attacks on separate streams")
+            
+            # Stream 1: MI-FGSM
+            with torch.cuda.stream(stream_mifgsm):
+                adv_mifgsm, success_mifgsm, norm_mifgsm = self._batch_targeted_mifgsm_attack(
+                    clean=clean,
+                    true_index=true_index,
+                    target_indices=top_targets,
+                    epsilon=epsilon,
+                    min_delta=min_delta,
+                    steps=15,
+                )
+            
+            # Stream 2: PGD (runs simultaneously with MI-FGSM)
+            with torch.cuda.stream(stream_pgd):
+                adv_pgd, success_pgd, norm_pgd = self._adaptive_pgd_attack(
+                    clean=clean,
+                    true_index=true_index,
+                    target_index=best_target,
+                    epsilon=epsilon,
+                    min_delta=min_delta,
+                    steps=20,
+                )
+            
+            # Wait for both streams to complete
+            torch.cuda.current_stream().wait_stream(stream_mifgsm)
+            torch.cuda.current_stream().wait_stream(stream_pgd)
+            bt.logging.debug("Parallel attacks completed")
+        else:
+            # CPU fallback (sequential)
+            adv_mifgsm, success_mifgsm, norm_mifgsm = self._batch_targeted_mifgsm_attack(
+                clean=clean,
+                true_index=true_index,
+                target_indices=top_targets,
+                epsilon=epsilon,
+                min_delta=min_delta,
+                steps=15,
+            )
+            adv_pgd, success_pgd, norm_pgd = self._adaptive_pgd_attack(
+                clean=clean,
+                true_index=true_index,
+                target_index=best_target,
+                epsilon=epsilon,
+                min_delta=min_delta,
+                steps=20,
+            )
+
+        # EARLY STOPPING: If either attack gives excellent result, skip C&W
+        if (success_mifgsm and norm_mifgsm < epsilon * 0.5) or (success_pgd and norm_pgd < epsilon * 0.5):
+            best_result = min(
+                [(norm_mifgsm, adv_mifgsm, "MI-FGSM"), (norm_pgd, adv_pgd, "PGD")],
+                key=lambda x: x[0] if x[0] != float('inf') else float('inf')
+            )
+            norm, adv, method = best_result
+            bt.logging.info(f"Early success with {method} (norm={norm:.6f}), skipping C&W")
+            
+            adv = self._minimize_perturbation(
+                clean=clean,
+                adv=adv,
+                true_index=true_index,
+                min_delta=min_delta,
+            )
+            final_norm = float((adv - clean).abs().max().item())
+            final_pred = predict_index(model=self.model, image_chw=adv)
+            bt.logging.info(
+                f"✓ FAST SUCCESS task={getattr(synapse, 'task_id', 'unknown')} "
+                f"method={method} true_idx={true_index} final_pred={final_pred} "
+                f"final_norm={final_norm:.6f} min_delta={min_delta:.6f}"
+            )
+            synapse.perturbed_image_b64 = encode_image_b64(adv)
+            return synapse
+
+        # CONDITIONAL Attack 3: Only run C&W if both previous attacks failed
+        success_cw = False
+        norm_cw = float('inf')
+        if not (success_mifgsm or success_pgd):
+            bt.logging.debug("Both MI-FGSM and PGD failed, trying C&W as fallback")
+            second_target = top_targets[1] if len(top_targets) > 1 else best_target
+            adv_cw, success_cw, norm_cw = self._cw_style_attack(
+                clean=clean,
+                true_index=true_index,
+                target_index=second_target,
+                epsilon=epsilon,
+                min_delta=min_delta,
+                steps=25,
+            )
+        else:
+            bt.logging.debug("Parallel attacks succeeded, skipping expensive C&W")
+            adv_cw = clean
 
         # Select the best successful attack (smallest perturbation)
         candidates = []
@@ -492,7 +561,7 @@ class PerturbMiner:
             
             bt.logging.info(f"Best attack: {best_method} with norm={initial_norm:.6f}")
 
-            # Phase 3: AGGRESSIVE MINIMIZATION - Use remaining VRAM for fine binary search
+            # Phase 3: FAST MINIMIZATION - 10 iterations balances quality vs speed
             bt.logging.debug(f"Minimizing perturbation from {initial_norm:.6f}")
             adv = self._minimize_perturbation(
                 clean=clean,
